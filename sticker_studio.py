@@ -2,6 +2,7 @@
 import asyncio
 import csv
 import datetime as dt
+import hashlib
 import inspect
 import io
 import json
@@ -75,8 +76,31 @@ DEFAULT_EXTERNAL_LINKS = {
     "author": "",
 }
 ADMIN_INPUT_TTL_SECONDS = 600
+KNOWN_COMPROMISED_TOKEN_SHA256 = {
+    "614ae22034739b2d4f6ab49461904e6dc6728431f48acb680d4a4ff3e5d84fcd",
+    "981d35b39807eb060ae45089779bfeb60b04821abebcd5d8c31d6a9e3fa02256",
+}
 
 console = Console()
+
+
+def validate_bot_token(token: str) -> tuple[bool, str]:
+    raw = (token or "").strip()
+    if not raw:
+        return False, "环境变量或 .env 中缺少 BOT_TOKEN"
+
+    lowered = raw.lower()
+    if ("your-bot-token" in lowered) or raw.startswith("123456:"):
+        return False, "检测到示例 BOT_TOKEN，请替换为真实 Token"
+
+    if not re.fullmatch(r"\d{6,}:[A-Za-z0-9_-]{30,}", raw):
+        return False, "BOT_TOKEN 格式不正确（应为 <数字>:<密钥>）"
+
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    if digest in KNOWN_COMPROMISED_TOKEN_SHA256:
+        return False, "检测到该 BOT_TOKEN 曾公开暴露，已触发安全拦截"
+
+    return True, ""
 
 
 def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
@@ -5272,9 +5296,16 @@ async def async_main() -> int:
     proxy = os.getenv("BOT_PROXY", "").strip() or None
     trust_env = os.getenv("BOT_TRUST_ENV", "1").strip().lower() not in {"0", "false", "no", "off"}
     force_ipv4 = os.getenv("BOT_FORCE_IPV4", "0").strip().lower() in {"1", "true", "yes", "on"}
-    if not token:
-        console.print("环境变量或 .env 中缺少 BOT_TOKEN", style="red")
+    allow_risky_token = os.getenv("BOT_ALLOW_RISKY_TOKEN", "0").strip().lower() in {"1", "true", "yes", "on"}
+    token_ok, token_msg = validate_bot_token(token)
+    if (not token_ok) and (not allow_risky_token):
+        console.print(f"安全拦截: {token_msg}", style="red")
+        console.print("请去 BotFather 重新生成 Token，并更新 .env 后重试。", style="yellow")
+        console.print("如需临时绕过校验，可设置 BOT_ALLOW_RISKY_TOKEN=1（不推荐）。", style="yellow")
         return 1
+    if (not token_ok) and allow_risky_token:
+        console.print(f"安全警告: {token_msg}", style="yellow")
+        console.print("已按 BOT_ALLOW_RISKY_TOKEN=1 继续启动，请尽快更换 Token。", style="yellow")
 
     try:
         async with TelegramBotClient(
